@@ -9,6 +9,7 @@
 use iron::{ Request, BeforeMiddleware, IronResult, typemap };
 use sessionstore::session;
 use super::sessionstore::SessionStore;
+use std::marker::PhantomData;
 
 /// The sessioning middleware.
 ///
@@ -26,13 +27,13 @@ use super::sessionstore::SessionStore;
 /// Session keys can be stored in the `Request` or `Alloy`.
 /// Usually, keys are stored in signed cookies, but anything
 /// retrievable from `Request` or `Alloy` will work.
-pub struct Sessions<K, V, S> {
+pub struct Sessions<K: typemap::Key, S: SessionStore<K>> {
     key_generator: fn(&Request) -> K,
     session_store: S
 }
 
-impl<K, V, S: SessionStore<K, V> + Clone> Clone for Sessions<K, V, S> {
-    fn clone(&self) -> Sessions<K, V, S> {
+impl<K: typemap::Key, S: SessionStore<K> + Clone> Clone for Sessions<K, S> {
+    fn clone(&self) -> Sessions<K, S> {
         Sessions {
             key_generator: self.key_generator,
             session_store: self.session_store.clone()
@@ -40,7 +41,7 @@ impl<K, V, S: SessionStore<K, V> + Clone> Clone for Sessions<K, V, S> {
     }
 }
 
-impl<K, V, S: SessionStore<K, V>> Sessions<K, V, S> {
+impl<K: typemap::Key, S: SessionStore<K>> Sessions<K, S> {
     /// Instantiate new sessioning middleware with the given
     /// key-generating function and session store.
     ///
@@ -53,7 +54,7 @@ impl<K, V, S: SessionStore<K, V>> Sessions<K, V, S> {
     /// `session_store` must implement the `SessionStore` trait.
     /// A default `Session` is provided to fulfill this.
     pub fn new(key_generator: fn(&Request) -> K,
-               store: S) -> Sessions<K, V, S> {
+               store: S) -> Sessions<K, S> {
         Sessions {
             key_generator: key_generator,
             session_store: store
@@ -62,59 +63,21 @@ impl<K, V, S: SessionStore<K, V>> Sessions<K, V, S> {
 }
 
 /// Key for inserting a Session<K, V> in the request extensions.
-pub struct RequestSession;
+pub struct RequestSession<K> {
+    phantom: PhantomData<K>
+}
 
 //impl<K: 'static, V: 'static> Assoc<session::Session<K, V>> for RequestSession {}
-impl<K: 'static, V: 'static> typemap::Key for RequestSession { type Value = session::Session<K, V>; }
+impl<K: typemap::Key> typemap::Key for RequestSession<K> { type Value = session::Session<K>; }
 
-impl<K: 'static, V: 'static, S: SessionStore<K, V> + Clone> BeforeMiddleware for Sessions<K, V, S> {
+impl<K: typemap::Key, S: SessionStore<K> + 'static + Clone + Send> BeforeMiddleware for Sessions<K, S> {
     /// Adds the session store to the `alloy`.
     fn before(&self, req: &mut Request) -> IronResult<()> {
         // Retrieve the session for this request
         let session = self.session_store.select_session((self.key_generator)(req));
 
         // Store this session in the alloy
-        req.extensions.insert::<RequestSession>(session);
+        req.extensions.insert::<RequestSession<K>>(session);
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test {
-    pub use super::*;
-    pub use super::super::sessionstore::*;
-    pub use super::super::sessionstore::session::*;
-    pub use super::super::sessionstore::hashsession::*;
-    pub use iron::*;
-    pub use test::mock::{request, response};
-    pub use std::sync::{Arc, Mutex};
-
-    pub fn get_session_id(_: &Request) -> char {'a'}
-
-    pub fn check_session_char_char(req: &mut Request) -> IronResult<()> {
-        let _ = req.extensions.find::<RequestSession, Session<char, char>>().unwrap();
-        Ok(())
-    }
-    pub fn check_session_char_u32(req: &mut Request) -> IronResult<()> {
-        let _ = req.extensions.find::<RequestSession, Session<char, u32>>().unwrap();
-        Ok(())
-    }
-
-    mod enter {
-        use super::*;
-
-        fn dummy(_: &mut Request) -> IronResult<Response> {
-            Ok(Response::new())
-        }
-
-        #[test]
-        fn handles_multiple_sessions() {
-            let mut chain = ChainBuilder::new(dummy);
-            chain.link_before(Sessions::new(get_session_id, HashSessionStore::<char, char>::new()));
-            chain.link_before(Sessions::new(get_session_id, HashSessionStore::<char, u32>::new()));
-            chain.link_before(check_session_char_char);
-            chain.link_before(check_session_char_u32);
-            let _ = Iron::new(chain).http("localhost:3000");
-        }
     }
 }
